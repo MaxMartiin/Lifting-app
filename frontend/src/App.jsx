@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 
-const API = 'http://192.168.0.190:8000'
+const API = 'https://lifting-app-production.up.railway.app'
 
 function App() {
   const [screen, setScreen] = useState('templates')
