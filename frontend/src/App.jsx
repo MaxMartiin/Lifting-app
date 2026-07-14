@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 
 const API = 'https://lifting-app-production.up.railway.app'
+const STORAGE_KEY = 'lifting_session'
 
 function App() {
   const [screen, setScreen] = useState('templates')
@@ -8,14 +9,42 @@ function App() {
   const [exercises, setExercises] = useState([])
   const [sessionId, setSessionId] = useState(null)
   const [workout, setWorkout] = useState(null)
-  const [exerciseIndex, setExerciseIndex] = useState(0)
+  const [currentExerciseId, setCurrentExerciseId] = useState(null)
   const [todaysSets, setTodaysSets] = useState([])
   const [loading, setLoading] = useState(false)
 
+  // Restore session from localStorage on mount
   useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved) {
+      try {
+        const data = JSON.parse(saved)
+        if (data.sessionId && data.workout) {
+          setSessionId(data.sessionId)
+          setWorkout(data.workout)
+          setCurrentExerciseId(data.currentExerciseId)
+          setTodaysSets(data.todaysSets || [])
+          setScreen('workout')
+        }
+      } catch {
+        localStorage.removeItem(STORAGE_KEY)
+      }
+    }
     fetchTemplates()
     fetchExercises()
   }, [])
+
+  // Save session to localStorage whenever key state changes
+  useEffect(() => {
+    if (sessionId && workout) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        sessionId,
+        workout,
+        currentExerciseId,
+        todaysSets,
+      }))
+    }
+  }, [sessionId, workout, currentExerciseId, todaysSets])
 
   function fetchTemplates() {
     fetch(`${API}/templates`)
@@ -44,7 +73,7 @@ function App() {
       const workoutData = await workoutRes.json()
       setSessionId(session_id)
       setWorkout(workoutData)
-      setExerciseIndex(0)
+      setCurrentExerciseId(workoutData.exercises[0].exercise_id)
       setTodaysSets([])
       setScreen('workout')
     } finally {
@@ -69,12 +98,18 @@ function App() {
     }))
   }
 
-  function finishExercise() {
-    if (exerciseIndex < workout.exercises.length - 1) {
-      setExerciseIndex(i => i + 1)
-    } else {
-      setScreen('done')
-    }
+  function finishWorkout() {
+    localStorage.removeItem(STORAGE_KEY)
+    setScreen('done')
+  }
+
+  function reset() {
+    localStorage.removeItem(STORAGE_KEY)
+    setScreen('templates')
+    setSessionId(null)
+    setWorkout(null)
+    setCurrentExerciseId(null)
+    setTodaysSets([])
   }
 
   async function saveTemplate(name, exerciseIds) {
@@ -97,30 +132,23 @@ function App() {
     setScreen('manageExercises')
   }
 
-  function reset() {
-    setScreen('templates')
-    setSessionId(null)
-    setWorkout(null)
-    setExerciseIndex(0)
-    setTodaysSets([])
-  }
+  if (screen === 'workout' && workout && currentExerciseId) {
+    const exercise = workout.exercises.find(e => e.exercise_id === currentExerciseId)
+    const setsToday = todaysSets.filter(s => s.exerciseId === currentExerciseId)
+    const completedIds = [...new Set(todaysSets.map(s => s.exerciseId))]
+    const allDone = workout.exercises.every(e => completedIds.includes(e.exercise_id))
 
-  if (screen === 'workout' && workout) {
-    const exercise = workout.exercises[exerciseIndex]
-    const setsToday = todaysSets.filter(s => s.exerciseId === exercise.exercise_id)
-    const isLast = exerciseIndex === workout.exercises.length - 1
-    const nextName = !isLast ? workout.exercises[exerciseIndex + 1].name : null
     return (
       <WorkoutScreen
         templateName={workout.template_name}
         exercise={exercise}
-        exerciseNumber={exerciseIndex + 1}
-        totalExercises={workout.exercises.length}
+        allExercises={workout.exercises}
         setsToday={setsToday}
-        onLogSet={(w, r) => logSet(exercise.exercise_id, w, r)}
-        onFinishExercise={finishExercise}
-        isLast={isLast}
-        nextName={nextName}
+        completedIds={completedIds}
+        onLogSet={(w, r) => logSet(currentExerciseId, w, r)}
+        onSelectExercise={setCurrentExerciseId}
+        onFinishWorkout={finishWorkout}
+        allDone={allDone}
       />
     )
   }
@@ -215,34 +243,193 @@ function TemplateListScreen({ templates, onSelect, onNew, onManageExercises, loa
   )
 }
 
-function ManageExercisesScreen({ exercises, onNew, onBack }) {
-  const categories = [...new Set(exercises.map(e => e.category))]
+function WorkoutScreen({
+  templateName, exercise, allExercises, setsToday,
+  completedIds, onLogSet, onSelectExercise, onFinishWorkout, allDone
+}) {
+  const rec = exercise.recommendation
+  const recWeight = rec?.recommended_weight ?? rec?.weight ?? null
+  const [weight, setWeight] = useState(recWeight ?? 45)
+  const [selectedReps, setSelectedReps] = useState(null)
+  const [logging, setLogging] = useState(false)
+
+  // KEY FIX: watch recWeight so it updates after every logged set
+  useEffect(() => {
+    if (recWeight !== null) setWeight(recWeight)
+  }, [recWeight])
+
+  async function handleLog() {
+    if (selectedReps === null) return
+    setLogging(true)
+    await onLogSet(weight, selectedReps)
+    setSelectedReps(null)
+    setLogging(false)
+  }
+
+  function adjustWeight(delta) {
+    setWeight(w => Math.max(0, Math.round((w + delta) * 10) / 10))
+  }
 
   return (
-    <div className="min-h-screen bg-gray-950 px-5 py-10">
-      <button onClick={onBack} className="text-gray-500 text-sm mb-6">
-        ← Back
-      </button>
-      <h1 className="text-3xl font-bold text-white mb-6">Exercises</h1>
+    <div className="min-h-screen bg-gray-950 px-5 py-8 flex flex-col">
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+        {templateName}
+      </p>
+      <h1 className="text-3xl font-bold text-white mb-5">{exercise.name}</h1>
 
-      {categories.map(cat => (
-        <div key={cat} className="mb-6">
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-            {cat}
+      {/* Weight card */}
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 mb-5">
+        {rec?.note && (
+          <p className="text-xs text-blue-400 text-center mb-4">{rec.note}</p>
+        )}
+        <div className="flex items-center justify-between gap-4">
+          <button
+            onClick={() => adjustWeight(-5)}
+            className="w-14 h-14 rounded-xl bg-gray-800 text-white text-2xl font-light active:scale-95 transition"
+          >
+            −
+          </button>
+          <div className="text-center">
+            <div className="text-5xl font-bold text-white">{weight}</div>
+            <div className="text-xs text-gray-500 mt-1">lbs · target 5–8 reps</div>
+          </div>
+          <button
+            onClick={() => adjustWeight(5)}
+            className="w-14 h-14 rounded-xl bg-gray-800 text-white text-2xl font-light active:scale-95 transition"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      {/* Rep buttons */}
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Reps</p>
+      <div className="grid grid-cols-4 gap-2 mb-4">
+        {Array.from({ length: 12 }, (_, i) => i + 1).map(n => (
+          <button
+            key={n}
+            onClick={() => setSelectedReps(n)}
+            className={`py-3.5 rounded-xl border text-sm font-semibold transition active:scale-95 ${
+              selectedReps === n
+                ? 'bg-blue-600 border-blue-600 text-white'
+                : n >= 5 && n <= 8
+                ? 'border-blue-800 text-blue-400 bg-gray-900'
+                : 'border-gray-800 text-gray-500 bg-gray-900'
+            }`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+
+      {/* Log button */}
+      <button
+        onClick={handleLog}
+        disabled={selectedReps === null || logging}
+        className="w-full bg-blue-600 text-white font-semibold rounded-xl py-4 mb-4 disabled:opacity-30 active:scale-[0.98] transition text-base"
+      >
+        {logging
+          ? 'Logging...'
+          : selectedReps
+          ? `Log ${weight} lbs × ${selectedReps}`
+          : 'Select reps to log'}
+      </button>
+
+      {/* Today's sets for this exercise */}
+      {setsToday.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs font-medium text-gray-600 uppercase tracking-wide mb-2">
+            Today's sets
           </p>
           <div className="bg-gray-900 rounded-xl border border-gray-800 divide-y divide-gray-800">
-            {exercises
-              .filter(e => e.category === cat)
-              .map(ex => (
-                <div key={ex.id} className="flex justify-between items-center px-4 py-3">
-                  <span className="text-white font-medium">{ex.name}</span>
-                  <span className="text-xs text-gray-500">+{ex.increment} lbs</span>
-                </div>
-              ))}
+            {setsToday.map((s, i) => (
+              <div key={i} className="flex justify-between px-4 py-3 text-sm">
+                <span className="text-gray-500">Set {i + 1}</span>
+                <span className="font-semibold text-white">
+                  {s.weight} lbs × {s.reps}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Exercise picker — tap any exercise to switch */}
+      <p className="text-xs font-medium text-gray-600 uppercase tracking-wide mb-2">
+        Exercises
+      </p>
+      <div className="flex flex-col gap-2 mb-4">
+        {allExercises.map(ex => {
+          const isActive = ex.exercise_id === exercise.exercise_id
+          const isDone = completedIds.includes(ex.exercise_id) && !isActive
+          return (
+            <button
+              key={ex.exercise_id}
+              onClick={() => onSelectExercise(ex.exercise_id)}
+              className={`flex items-center justify-between px-4 py-3 rounded-xl border transition active:scale-[0.98] ${
+                isActive
+                  ? 'bg-blue-950 border-blue-700 text-white'
+                  : isDone
+                  ? 'bg-gray-900 border-gray-800 text-gray-600'
+                  : 'bg-gray-900 border-gray-800 text-gray-300'
+              }`}
+            >
+              <span className="font-medium">{ex.name}</span>
+              {isActive && <span className="text-blue-400 text-xs">current</span>}
+              {isDone && <span className="text-green-500 text-sm">✓</span>}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Finish workout */}
+      {allDone && (
+        <button
+          onClick={onFinishWorkout}
+          className="w-full bg-green-700 text-white font-semibold rounded-xl py-4 active:scale-[0.98] transition"
+        >
+          Finish workout 💪
+        </button>
+      )}
+    </div>
+  )
+}
+
+function DoneScreen({ onBack }) {
+  return (
+    <div className="min-h-screen bg-gray-950 px-5 flex flex-col items-center justify-center text-center">
+      <div className="text-6xl mb-4">💪</div>
+      <h1 className="text-3xl font-bold text-white mb-2">Workout done</h1>
+      <p className="text-gray-500 mb-8">Nice work. See you next session.</p>
+      <button
+        onClick={onBack}
+        className="bg-blue-600 text-white font-semibold rounded-xl px-8 py-4 active:scale-[0.98] transition"
+      >
+        Back to workouts
+      </button>
+    </div>
+  )
+}
+
+function ManageExercisesScreen({ exercises, onNew, onBack }) {
+  const categories = [...new Set(exercises.map(e => e.category))]
+  return (
+    <div className="min-h-screen bg-gray-950 px-5 py-10">
+      <button onClick={onBack} className="text-gray-500 text-sm mb-6">← Back</button>
+      <h1 className="text-3xl font-bold text-white mb-6">Exercises</h1>
+      {categories.map(cat => (
+        <div key={cat} className="mb-6">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{cat}</p>
+          <div className="bg-gray-900 rounded-xl border border-gray-800 divide-y divide-gray-800">
+            {exercises.filter(e => e.category === cat).map(ex => (
+              <div key={ex.id} className="flex justify-between items-center px-4 py-3">
+                <span className="text-white font-medium">{ex.name}</span>
+                <span className="text-xs text-gray-500">+{ex.increment} lbs</span>
+              </div>
+            ))}
           </div>
         </div>
       ))}
-
       <button
         onClick={onNew}
         className="w-full border border-dashed border-gray-700 text-gray-500 font-medium rounded-2xl py-4 active:scale-[0.98] transition"
@@ -268,14 +455,10 @@ function NewExerciseScreen({ onSave, onBack }) {
 
   return (
     <div className="min-h-screen bg-gray-950 px-5 py-10">
-      <button onClick={onBack} className="text-gray-500 text-sm mb-6">
-        ← Back
-      </button>
+      <button onClick={onBack} className="text-gray-500 text-sm mb-6">← Back</button>
       <h1 className="text-3xl font-bold text-white mb-6">New exercise</h1>
 
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-        Exercise name
-      </p>
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Name</p>
       <input
         type="text"
         value={name}
@@ -284,9 +467,7 @@ function NewExerciseScreen({ onSave, onBack }) {
         className="w-full bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-600 mb-6 text-base outline-none focus:border-blue-600"
       />
 
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-        Category
-      </p>
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Category</p>
       <div className="grid grid-cols-3 gap-2 mb-6">
         {['Push', 'Pull', 'Legs'].map(cat => (
           <button
@@ -355,14 +536,10 @@ function NewTemplateScreen({ exercises, onSave, onBack }) {
 
   return (
     <div className="min-h-screen bg-gray-950 px-5 py-10">
-      <button onClick={onBack} className="text-gray-500 text-sm mb-6">
-        ← Back
-      </button>
+      <button onClick={onBack} className="text-gray-500 text-sm mb-6">← Back</button>
       <h1 className="text-3xl font-bold text-white mb-6">New template</h1>
 
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-        Template name
-      </p>
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Name</p>
       <input
         type="text"
         value={name}
@@ -374,29 +551,26 @@ function NewTemplateScreen({ exercises, onSave, onBack }) {
       <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
         Select exercises
       </p>
-
       {categories.map(cat => (
         <div key={cat} className="mb-4">
           <p className="text-xs text-gray-600 mb-2">{cat}</p>
           <div className="flex flex-col gap-2">
-            {exercises
-              .filter(e => e.category === cat)
-              .map(ex => (
-                <button
-                  key={ex.id}
-                  onClick={() => toggleExercise(ex.id)}
-                  className={`flex items-center justify-between p-4 rounded-xl border transition active:scale-[0.98] ${
-                    selectedIds.includes(ex.id)
-                      ? 'bg-blue-950 border-blue-700 text-white'
-                      : 'bg-gray-900 border-gray-800 text-gray-400'
-                  }`}
-                >
-                  <span className="font-medium">{ex.name}</span>
-                  {selectedIds.includes(ex.id) && (
-                    <span className="text-blue-400">✓</span>
-                  )}
-                </button>
-              ))}
+            {exercises.filter(e => e.category === cat).map(ex => (
+              <button
+                key={ex.id}
+                onClick={() => toggleExercise(ex.id)}
+                className={`flex items-center justify-between p-4 rounded-xl border transition active:scale-[0.98] ${
+                  selectedIds.includes(ex.id)
+                    ? 'bg-blue-950 border-blue-700 text-white'
+                    : 'bg-gray-900 border-gray-800 text-gray-400'
+                }`}
+              >
+                <span className="font-medium">{ex.name}</span>
+                {selectedIds.includes(ex.id) && (
+                  <span className="text-blue-400">✓</span>
+                )}
+              </button>
+            ))}
           </div>
         </div>
       ))}
@@ -407,158 +581,6 @@ function NewTemplateScreen({ exercises, onSave, onBack }) {
         className="w-full bg-blue-600 text-white font-semibold rounded-xl py-4 mt-4 disabled:opacity-30 active:scale-[0.98] transition"
       >
         {saving ? 'Saving...' : `Save template (${selectedIds.length} exercises)`}
-      </button>
-    </div>
-  )
-}
-
-function WorkoutScreen({
-  templateName, exercise, exerciseNumber, totalExercises,
-  setsToday, onLogSet, onFinishExercise, isLast, nextName
-}) {
-  const rec = exercise.recommendation
-  const baseWeight = rec?.recommended_weight ?? rec?.weight ?? null
-  const [weight, setWeight] = useState(baseWeight ?? 45)
-  const [selectedReps, setSelectedReps] = useState(null)
-  const [logging, setLogging] = useState(false)
-
-  useEffect(() => {
-    const w = rec?.recommended_weight ?? rec?.weight ?? null
-    if (w !== null) setWeight(w)
-  }, [exercise.exercise_id])
-
-  async function handleLog() {
-    if (selectedReps === null) return
-    setLogging(true)
-    await onLogSet(weight, selectedReps)
-    setSelectedReps(null)
-    setLogging(false)
-  }
-
-  function adjustWeight(delta) {
-    setWeight(w => Math.max(0, Math.round((w + delta) * 10) / 10))
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-950 px-5 py-8 flex flex-col">
-      <div className="flex gap-1.5 mb-6">
-        {Array.from({ length: totalExercises }).map((_, i) => (
-          <div
-            key={i}
-            className={`h-1 rounded-full transition-all ${
-              i === exerciseNumber - 1
-                ? 'flex-1 bg-blue-500'
-                : i < exerciseNumber - 1
-                ? 'w-6 bg-blue-900'
-                : 'w-6 bg-gray-800'
-            }`}
-          />
-        ))}
-      </div>
-
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
-        {templateName} · {exerciseNumber} of {totalExercises}
-      </p>
-      <h1 className="text-3xl font-bold text-white mb-6">{exercise.name}</h1>
-
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 mb-5">
-        {rec?.note && (
-          <p className="text-xs text-blue-400 text-center mb-4">{rec.note}</p>
-        )}
-        <div className="flex items-center justify-between gap-4">
-          <button
-            onClick={() => adjustWeight(-2.5)}
-            className="w-14 h-14 rounded-xl bg-gray-800 text-white text-2xl font-light active:scale-95 transition"
-          >
-            −
-          </button>
-          <div className="text-center">
-            <div className="text-5xl font-bold text-white">{weight}</div>
-            <div className="text-xs text-gray-500 mt-1">lbs · target 5–8 reps</div>
-          </div>
-          <button
-            onClick={() => adjustWeight(2.5)}
-            className="w-14 h-14 rounded-xl bg-gray-800 text-white text-2xl font-light active:scale-95 transition"
-          >
-            +
-          </button>
-        </div>
-      </div>
-
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-        Reps
-      </p>
-      <div className="grid grid-cols-4 gap-2 mb-5">
-        {Array.from({ length: 12 }, (_, i) => i + 1).map(n => (
-          <button
-            key={n}
-            onClick={() => setSelectedReps(n)}
-            className={`py-3.5 rounded-xl border text-sm font-semibold transition active:scale-95 ${
-              selectedReps === n
-                ? 'bg-blue-600 border-blue-600 text-white'
-                : n >= 5 && n <= 8
-                ? 'border-blue-800 text-blue-400 bg-gray-900'
-                : 'border-gray-800 text-gray-500 bg-gray-900'
-            }`}
-          >
-            {n}
-          </button>
-        ))}
-      </div>
-
-      <button
-        onClick={handleLog}
-        disabled={selectedReps === null || logging}
-        className="w-full bg-blue-600 text-white font-semibold rounded-xl py-4 mb-3 disabled:opacity-30 active:scale-[0.98] transition text-base"
-      >
-        {logging
-          ? 'Logging...'
-          : selectedReps
-          ? `Log ${weight} lbs × ${selectedReps}`
-          : 'Select reps to log'}
-      </button>
-
-      {setsToday.length > 0 && (
-        <>
-          <div className="mb-3">
-            <p className="text-xs font-medium text-gray-600 uppercase tracking-wide mb-2">
-              Today's sets
-            </p>
-            <div className="bg-gray-900 rounded-xl border border-gray-800 divide-y divide-gray-800">
-              {setsToday.map((s, i) => (
-                <div key={i} className="flex justify-between px-4 py-3 text-sm">
-                  <span className="text-gray-500">Set {i + 1}</span>
-                  <span className="font-semibold text-white">
-                    {s.weight} lbs × {s.reps}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <button
-            onClick={onFinishExercise}
-            className="w-full bg-gray-900 border border-gray-700 text-white font-semibold rounded-xl py-4 active:scale-[0.98] transition"
-          >
-            {isLast ? 'Finish workout 💪' : `Next: ${nextName} →`}
-          </button>
-        </>
-      )}
-    </div>
-  )
-}
-
-function DoneScreen({ onBack }) {
-  return (
-    <div className="min-h-screen bg-gray-950 px-5 flex flex-col items-center justify-center text-center">
-      <div className="text-6xl mb-4">💪</div>
-      <h1 className="text-3xl font-bold text-white mb-2">Workout done</h1>
-      <p className="text-gray-500 mb-8">Nice work. See you next session.</p>
-      <button
-        onClick={onBack}
-        className="bg-blue-600 text-white font-semibold rounded-xl px-8 py-4 active:scale-[0.98] transition"
-      >
-        Back to workouts
       </button>
     </div>
   )
