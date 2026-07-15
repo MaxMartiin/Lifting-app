@@ -1,19 +1,25 @@
-from sqlalchemy import create_engine, Column, Integer, Float, String, Boolean, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+import os
+from sqlalchemy import create_engine, Column, Integer, Float, String, Boolean, DateTime, ForeignKey, event
+from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
-from sqlalchemy import event
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./lifting.db")
 
-DATABASE_URL = "sqlite:///./lifting.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-@event.listens_for(engine, "connect")
-def enable_foreign_keys(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+# Railway gives Postgres URLs starting with postgres:// but SQLAlchemy needs postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
+
+# Only enable SQLite foreign keys when using SQLite locally
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 class Exercise(Base):
     __tablename__ = "exercises"
